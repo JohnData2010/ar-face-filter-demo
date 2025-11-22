@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <!-- NEW: giúp hiển thị đúng trên điện thoại -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AR Face Filter – Advanced (Dual View)</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        sans-serif;
+    }
+    body {
+      margin: 0;
+      padding: 16px;
+      background: #0f172a;
+      color: #e5e7eb;
+    }
+    h1 {
+      margin-bottom: 8px;
+      font-size: 22px;
+    }
+    .controls {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    button {
+      padding: 8px 14px;
+      border-radius: 999px;
+      border: 1px solid #4b5563;
+      background: #111827;
+      color: #e5e7eb;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    button:hover:not(:disabled) {
+      background: #1f2937;
+    }
+    button.active {
+      background: #2563eb;
+      border-color: #2563eb;
+      color: white;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+
+    .preview-row {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+
+    .preview {
+      position: relative;
+      flex: 1 1 300px;
+      max-width: 640px;
+      aspect-ratio: 4/3;
+      border-radius: 16px;
+      overflow: hidden;
+      border: 1px solid #4b5563;
+      background: black;
+    }
+
+    video,
+    canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    /* Mirror only the video for a selfie view */
+    video {
+      transform: scaleX(-1);
+    }
+
+    /* Canvas is not mirrored so text is readable */
+    canvas {
+      pointer-events: none;
+    }
+
+    .preview-label {
+      position: absolute;
+      z-index: 10;
+      left: 8px;
+      top: 8px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.8);
+      font-size: 11px;
+      color: #e5e7eb;
+    }
+
+    .info {
+      max-width: 640px;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .pill {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .pill-high {
+      background: rgba(220, 38, 38, 0.15);
+      color: #fca5a5;
+      border: 1px solid rgba(248, 113, 113, 0.7);
+    }
+    ul {
+      padding-left: 18px;
+      margin-top: 4px;
+    }
+
+    /* NEW: responsive cho màn hình nhỏ */
+    @media (max-width: 768px) {
+      body {
+        padding: 10px;
+      }
+      h1 {
+        font-size: 18px;
+      }
+      .controls {
+        flex-direction: column;
+      }
+      .controls button {
+        width: 100%;
+      }
+      .preview-row {
+        flex-direction: column;
+      }
+      .preview {
+        flex: 1 1 100%;
+        max-width: 100%;
+      }
+      .info {
+        max-width: 100%;
+        font-size: 13px;
+      }
+    }
+  </style>
+
+  <!-- Mediapipe libraries -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+</head>
+<body>
+  <h1>AR Face Filter Demo</h1>
+
+  <div class="controls">
+    <button id="startBtn">1. Start Camera</button>
+    <button id="advancedBtn">2. Demo Filter</button>
+    <!-- Nút mới để tắt filter -->
+    <button id="stopBtn" disabled>3. Stop Filter</button>
+  </div>
+
+  <div class="preview-row">
+    <!-- Screen 1: what user sees -->
+    <div class="preview">
+      <span class="preview-label">Screen 1 – User view</span>
+      <video id="video" playsinline></video>
+      <canvas id="canvasMain"></canvas>
+    </div>
+
+    <!-- Screen 2: tech - underlying view -->
+    <div class="preview">
+      <span class="preview-label">Screen 2 – Underlying tech</span>
+      <canvas id="canvasSide"></canvas>
+    </div>
+  </div>
+
+  <div class="info">
+    <!-- ĐÃ ĐỔI: highlight text thay vì "Filter mode: geometry view" -->
+    <p><strong id="modeLabel">This is a local AR demo - no data collected or stored!</strong></p>
+    <div id="riskBadge"></div>
+    <p id="privacyText">
+      Click “Demo Filter” to see how simple facial geometry could be used to guess your mood (demo only).
+    </p>
+    <ul id="dataList"></ul>
+  </div>
+
+  <script>
+    window.addEventListener("DOMContentLoaded", () => {
+      const startBtn = document.getElementById("startBtn");
+      const advancedBtn = document.getElementById("advancedBtn");
+      const stopBtn = document.getElementById("stopBtn"); // nút mới
+
+      const videoElement = document.getElementById("video");
+      const canvasMain = document.getElementById("canvasMain");
+      const canvasSide = document.getElementById("canvasSide");
+
+      if (!videoElement || !canvasMain || !canvasSide) {
+        console.error("Cannot find video or canvas elements in HTML.");
+        return;
+      }
+
+      const ctxMain = canvasMain.getContext("2d");
+      const ctxSide = canvasSide.getContext("2d");
+
+      const modeLabel = document.getElementById("modeLabel");
+      const riskBadge = document.getElementById("riskBadge");
+      const privacyText = document.getElementById("privacyText");
+      const dataList = document.getElementById("dataList");
+
+      let camera = null;
+      let started = false;
+      let currentMode = "none"; // "advanced"
+
+      // Smoothed expression metrics for advanced mode
+      let advancedMetrics = null;
+      function resetAdvancedMetrics() {
+        advancedMetrics = null;
+      }
+
+      // ---------- Mode & UI ----------
+      function setMode(mode) {
+        currentMode = mode;
+        advancedBtn.classList.remove("active");
+        resetAdvancedMetrics();
+
+        if (mode === "advanced") {
+          advancedBtn.classList.add("active");
+          // KHÔNG đổi modeLabel nữa để giữ nguyên câu highlight
+          riskBadge.innerHTML = "";
+          privacyText.textContent =
+            "Screen 1 shows a fun filter as what you can only see. Screen 2 shows how facial geometry can be used to guess your mood (demo only).";
+          dataList.innerHTML = "";
+
+          // bật nút Stop khi filter đang chạy
+          stopBtn.disabled = false;
+        } else {
+          // KHÔNG đổi modeLabel nữa
+          riskBadge.innerHTML = "";
+          privacyText.textContent =
+            'Click "Demo Filter" to see how facial geometry is used in this demo.';
+          dataList.innerHTML = "";
+
+          // tắt nút Stop khi filter đã tắt
+          stopBtn.disabled = true;
+        }
+      }
+
+      // ---------- FaceMesh + drawing ----------
+      function onResults(results) {
+        if (!videoElement.videoWidth || !videoElement.videoHeight) return;
+
+        canvasMain.width = videoElement.videoWidth;
+        canvasMain.height = videoElement.videoHeight;
+        canvasSide.width = videoElement.videoWidth;
+        canvasSide.height = videoElement.videoHeight;
+
+        ctxMain.save();
+        ctxSide.save();
+
+        ctxMain.clearRect(0, 0, canvasMain.width, canvasMain.height);
+        ctxSide.clearRect(0, 0, canvasSide.width, canvasSide.height);
+
+        if (!(results.multiFaceLandmarks && results.multiFaceLandmarks.length)) {
+          ctxMain.restore();
+          ctxSide.restore();
+          return;
+        }
+
+        const landmarks = results.multiFaceLandmarks[0];
+
+        if (currentMode === "advanced") {
+          // Screen 1: fun filter
+          drawSimpleFilterUser(landmarks, ctxMain, canvasMain);
+          // Screen 2: mood HUD
+          drawAdvancedAnalytics(landmarks, ctxSide, canvasSide);
+        }
+
+        ctxMain.restore();
+        ctxSide.restore();
+      }
+
+      // ---------- Helpers ----------
+      function dist(a, b) {
+        const dx = a.x - b.x;
+        const dy = a.y - b.y;
+        return Math.sqrt(dx * dx + dy * dy);
+      }
+
+      // ---------- User view (glasses + blush) ----------
+      function drawSimpleFilterUser(lm, ctx, canvas) {
+        const RIGHT_EYE_OUTER = 33;
+        const RIGHT_EYE_INNER = 133;
+        const LEFT_EYE_INNER = 362;
+        const LEFT_EYE_OUTER = 263;
+        const NOSE_BRIDGE = 168;
+        const LEFT_CHEEK = 234;
+        const RIGHT_CHEEK = 454;
+
+        const toMirrorPx = (pt) => ({
+          x: canvas.width - pt.x * canvas.width,
+          y: pt.y * canvas.height,
+        });
+
+        const reo = toMirrorPx(lm[RIGHT_EYE_OUTER]);
+        const rei = toMirrorPx(lm[RIGHT_EYE_INNER]);
+        const leo = toMirrorPx(lm[LEFT_EYE_OUTER]);
+        const lei = toMirrorPx(lm[LEFT_EYE_INNER]);
+
+        let rightEyeCenter = {
+          x: (reo.x + rei.x) / 2,
+          y: (reo.y + rei.y) / 2,
+        };
+        let leftEyeCenter = {
+          x: (leo.x + lei.x) / 2,
+          y: (leo.y + lei.y) / 2,
+        };
+
+        if (leftEyeCenter.x > rightEyeCenter.x) {
+          const tmp = leftEyeCenter;
+          leftEyeCenter = rightEyeCenter;
+          rightEyeCenter = tmp;
+        }
+
+        const nb = toMirrorPx(lm[NOSE_BRIDGE]);
+        let lc = toMirrorPx(lm[LEFT_CHEEK]);
+        let rc = toMirrorPx(lm[RIGHT_CHEEK]);
+
+        const topFace = toMirrorPx(lm[10]);
+        const bottomFace = toMirrorPx(lm[152]);
+        const faceHeight = Math.max(
+          Math.abs(bottomFace.y - topFace.y),
+          dist(leftEyeCenter, rightEyeCenter) * 2
+        );
+
+        const eyeDist = dist(leftEyeCenter, rightEyeCenter);
+        if (eyeDist < 10 || faceHeight < 20) return;
+
+        const cheekOffsetY = faceHeight * 0.06;
+        lc.y += cheekOffsetY;
+        rc.y += cheekOffsetY;
+
+        const midEye = {
+          x: (leftEyeCenter.x + rightEyeCenter.x) / 2,
+          y: (leftEyeCenter.y + rightEyeCenter.y) / 2,
+        };
+
+        const angle = Math.atan2(
+          leftEyeCenter.y - rightEyeCenter.y,
+          leftEyeCenter.x - rightEyeCenter.x
+        );
+
+        const frameWidth = eyeDist * 0.8;
+        const frameHeight = eyeDist * 0.55;
+        const templeLength = frameWidth * 0.7;
+
+        ctx.save();
+        ctx.translate(midEye.x, midEye.y);
+        ctx.rotate(angle);
+
+        ctx.lineWidth = Math.max(2, eyeDist * 0.04);
+        ctx.strokeStyle = "rgba(37, 99, 235, 0.95)";
+        ctx.fillStyle = "rgba(37, 99, 235, 0.12)";
+
+        const leftCenterX = -eyeDist / 2;
+        const rightCenterX = eyeDist / 2;
+        const topY = -frameHeight * 0.4;
+
+        ctx.beginPath();
+        ctx.roundRect(
+          leftCenterX - frameWidth / 2,
+          topY,
+          frameWidth,
+          frameHeight,
+          10
+        );
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.roundRect(
+          rightCenterX - frameWidth / 2,
+          topY,
+          frameWidth,
+          frameHeight,
+          10
+        );
+        ctx.fill();
+        ctx.stroke();
+
+        const bridgeY = topY + frameHeight * 0.45;
+        ctx.beginPath();
+        ctx.moveTo(leftCenterX + frameWidth / 2, bridgeY);
+        ctx.lineTo(rightCenterX - frameWidth / 2, bridgeY);
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(leftCenterX - frameWidth / 2, topY + frameHeight * 0.55);
+        ctx.lineTo(
+          leftCenterX - frameWidth / 2 - templeLength,
+          topY + frameHeight * 0.2
+        );
+        ctx.moveTo(rightCenterX + frameWidth / 2, topY + frameHeight * 0.55);
+        ctx.lineTo(
+          rightCenterX + frameWidth / 2 + templeLength,
+          topY + frameHeight * 0.2
+        );
+        ctx.stroke();
+
+        ctx.restore();
+
+        function drawBlushPoint(p) {
+          const r = eyeDist * 0.55;
+          const gradient = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
+          gradient.addColorStop(0, "rgba(244, 114, 182, 0.75)");
+          gradient.addColorStop(1, "rgba(244, 114, 182, 0)");
+
+          ctx.fillStyle = gradient;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, r, 0, 2 * Math.PI);
+          ctx.fill();
+        }
+
+        drawBlushPoint(lc);
+        drawBlushPoint(rc);
+      }
+
+      // ---------- Advanced filter: analytics HUD ----------
+      function drawAdvancedAnalytics(lm, ctx, canvas) {
+        const toMirrorPx = (pt) => ({
+          x: canvas.width - pt.x * canvas.width,
+          y: pt.y * canvas.height,
+        });
+
+        ctx.fillStyle = "rgba(15, 23, 42, 0.5)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        let minX = canvas.width,
+          maxX = 0,
+          minY = canvas.height,
+          maxY = 0;
+
+        lm.forEach((pt) => {
+          const p = toMirrorPx(pt);
+          if (p.x < minX) minX = p.x;
+          if (p.x > maxX) maxX = p.x;
+          if (p.y < minY) minY = p.y;
+          if (p.y > maxY) maxY = p.y;
+        });
+
+        const bx = minX;
+        const by = minY;
+        const bw = maxX - minX;
+        const bh = maxY - minY;
+
+        ctx.fillStyle = "#38bdf8";
+        lm.forEach((pt) => {
+          const p = toMirrorPx(pt);
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 1.1, 0, 2 * Math.PI);
+          ctx.fill();
+        });
+
+        ctx.strokeStyle = "rgba(249,115,22,0.9)";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([8, 5]);
+        ctx.strokeRect(bx, by, bw, bh);
+        ctx.setLineDash([]);
+
+        const LEFT_EYE_UP = lm[159];
+        const LEFT_EYE_DOWN = lm[145];
+        const RIGHT_EYE_UP = lm[386];
+        const RIGHT_EYE_DOWN = lm[374];
+
+        const MOUTH_LEFT = lm[61];
+        const MOUTH_RIGHT = lm[291];
+        const MOUTH_UP = lm[13];
+        const MOUTH_DOWN = lm[14];
+
+        const leu = toMirrorPx(LEFT_EYE_UP);
+        const led = toMirrorPx(LEFT_EYE_DOWN);
+        const reu = toMirrorPx(RIGHT_EYE_UP);
+        const red = toMirrorPx(RIGHT_EYE_DOWN);
+        const ml = toMirrorPx(MOUTH_LEFT);
+        const mr = toMirrorPx(MOUTH_RIGHT);
+        const mu = toMirrorPx(MOUTH_UP);
+        const md = toMirrorPx(MOUTH_DOWN);
+
+        const eyeOpenL = dist(leu, led);
+        const eyeOpenR = dist(reu, red);
+        const eyeOpenAvg = (eyeOpenL + eyeOpenR) / 2;
+        const mouthWidth = dist(ml, mr);
+        const mouthOpen = dist(mu, md);
+        const faceHeight = bh || 1;
+
+        const eyeOpenNorm = eyeOpenAvg / faceHeight;
+        const smileRatio = mouthWidth / faceHeight;
+        const mouthOpenRatio = mouthOpen / faceHeight;
+
+        if (!advancedMetrics) {
+          advancedMetrics = {
+            eyeOpenNorm,
+            smileRatio,
+            mouthOpenRatio,
+          };
+        } else {
+          const alpha = 0.25;
+          advancedMetrics.eyeOpenNorm =
+            (1 - alpha) * advancedMetrics.eyeOpenNorm + alpha * eyeOpenNorm;
+          advancedMetrics.smileRatio =
+            (1 - alpha) * advancedMetrics.smileRatio + alpha * smileRatio;
+          advancedMetrics.mouthOpenRatio =
+            (1 - alpha) * advancedMetrics.mouthOpenRatio +
+            alpha * mouthOpenRatio;
+        }
+
+        const m = advancedMetrics;
+
+        let moodLabel = "Neutral";
+        const strongSmile = m.smileRatio > 0.33;
+        const mediumSmile = m.smileRatio > 0.30;
+        const mouthWideOpen = m.mouthOpenRatio > 0.11;
+        const eyesVeryNarrow = m.eyeOpenNorm < 0.050;
+        const eyesNarrow = m.eyeOpenNorm < 0.058;
+
+        if ((strongSmile || mediumSmile) && !mouthWideOpen && !eyesVeryNarrow) {
+          moodLabel = "Happy";
+        } else if ((eyesVeryNarrow || (eyesNarrow && !mediumSmile)) && !mouthWideOpen) {
+          moodLabel = "Tired";
+        } else if (mouthWideOpen && !strongSmile) {
+          moodLabel = "Surprised";
+        } else {
+          moodLabel = "Neutral";
+        }
+
+        // --- HUD position (tránh đè lên mặt) ---
+        let hudX = Math.max(12, bx);
+        let hudY = Math.max(24, by - 28);
+
+        const hudWidth = 220;
+        const hudHeight = 40;
+
+        const overlapsHoriz =
+          hudX < bx + bw && hudX + hudWidth > bx;
+        const overlapsVert =
+          hudY > by - 5 && hudY < by + bh;
+
+        if (overlapsHoriz && overlapsVert) {
+          if (bx + bw + hudWidth + 16 < canvas.width) {
+            hudX = bx + bw + 16;
+          } else {
+            hudX = Math.max(12, bx - hudWidth - 16);
+          }
+          hudY = Math.max(24, by + 16);
+        }
+
+        ctx.font = "16px system-ui, sans-serif";
+        ctx.fillStyle = "#e5e7eb";
+        ctx.fillText("Geometry-based mood (demo only)", hudX, hudY);
+
+        ctx.font = "18px system-ui, sans-serif";
+        ctx.fillStyle = "#f97316";
+        ctx.fillText(`Mood: ${moodLabel}`, hudX, hudY + 24);
+
+        const sidebarWidth = 190;
+        let sidebarX = bx + bw + 24;
+        if (sidebarX + sidebarWidth > canvas.width - 10) {
+          sidebarX = Math.max(10, bx - sidebarWidth - 24);
+        }
+        let sidebarY = by + 16;
+
+        ctx.font = "13px system-ui, sans-serif";
+        ctx.fillStyle = "#e5e7eb";
+        ctx.fillText("Signals used in this demo:", sidebarX, sidebarY);
+        sidebarY += 16;
+        ctx.fillText("- Smile width (mouth width / happy)", sidebarX, sidebarY);
+        sidebarY += 14;
+        ctx.fillText("- Eye openness (blink / tired)", sidebarX, sidebarY);
+        sidebarY += 14;
+        ctx.fillText("- Mouth openness (surprised)", sidebarX, sidebarY);
+
+        const footX = bx;
+        const footY = by + bh + 30;
+        ctx.font = "12px system-ui, sans-serif";
+
+        // ẨN footer ở Screen 2: vẫn giữ code, chỉ cho alpha = 0
+        ctx.save();
+        ctx.fillStyle = "rgba(209,213,219,0)";
+        ctx.fillText(
+          "This is a local AR demo - no data collected or stored! :)",
+          footX,
+          footY
+        );
+        ctx.restore();
+      }
+
+      // ---------- FaceMesh init ----------
+      const faceMesh = new FaceMesh({
+        locateFile: (file) =>
+          `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`,
+      });
+
+      faceMesh.setOptions({
+        maxNumFaces: 1,
+        refineLandmarks: true,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5,
+      });
+
+      faceMesh.onResults(onResults);
+
+      // ---------- Camera ----------
+      startBtn.onclick = async () => {
+        if (started) return;
+        started = true;
+        startBtn.disabled = true;
+        startBtn.textContent = "Camera running";
+
+        videoElement.style.display = "block";
+
+        const camera = new Camera(videoElement, {
+          onFrame: async () => {
+            await faceMesh.send({ image: videoElement });
+          },
+          width: 640,
+          height: 480,
+        });
+
+        camera.start().catch((err) => {
+          alert("Cannot access camera. Please check permissions.");
+          console.error(err);
+          startBtn.disabled = false;
+          startBtn.textContent = "1. Start camera";
+          started = false;
+        });
+      };
+
+      // bật filter
+      advancedBtn.onclick = () => setMode("advanced");
+
+      // nút mới: tắt filter, quay về "None"
+      stopBtn.onclick = () => setMode("none");
+
+      setMode("none");
+    });
+  </script>
+</body>
+</html>
